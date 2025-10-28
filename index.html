@@ -51,16 +51,24 @@
 
   <!-- Ethers v6 desde CDN. Necesitás conexión a internet para cargar esta librería. -->
   <script type="module">
-    import { BrowserProvider, Contract } from "https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.min.js";
+  import { BrowserProvider, Contract } from "https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.min.js";
 
-    // 🔧 Pegá aquí la dirección de TU contrato VisualWallV2 en Sepolia (reemplazá la constante):
-    const CONTRACT_ADDRESS = "0xA4F64573d3f5b51D65498C3fD4645f35515De4bb";
-    const ABI = [
-      "event PostCreated(uint256 indexed id, address indexed author, uint256 timestamp, string message)",
-      "function createPost(string _message) public",
-      "function getPostsCount() external view returns (uint256)",
-      "function getPostsRange(uint256 start, uint256 limit) external view returns (tuple(uint256 id,string message,address author,uint256 timestamp)[])"
-    ];
+  const CONTRACT_ADDRESS = "0xa4f64573d3f5b51d65498c3fd4645f35515de4bb";
+
+  // ABI “ultra-compatible” para V2
+  const ABI = [
+    // eventos
+    "event PostCreated(uint256 indexed id, address indexed author, uint256 timestamp, string message)",
+    // escritura
+    "function createPost(string _message) public",
+    // lecturas base
+    "function getPostsCount() view returns (uint256)",
+    // rango de posts (struct sin 'deleted', sin nombres — más tolerante)
+    "function getPostsRange(uint256 start, uint256 limit) view returns (tuple(uint256,string,address,uint256)[])",
+    // por si existe getPost en tu V2
+    "function getPost(uint256 id) view returns (uint256,string,address,uint256)"
+  ];
+
 
     const sepoliaId = 11155111n;
 
@@ -119,38 +127,65 @@
       } catch {}
     }
 
-    async function load(scrollTop=false) {
-      listEl.innerHTML = "<div class='muted'>Cargando posts…</div>";
+      async function load(scrollTop=false) {
+    listEl.innerHTML = "<div class='muted'>Cargando posts…</div>";
+    try {
+      const totalBN = await contract.getPostsCount();
+      const total = Number(totalBN);
+      const page = 50;
+      const start = Math.max(0, total - page);
+
+      let items = [];
+
+      // Intento 1: usar getPostsRange (rápido)
       try {
-        const total = await contract.getPostsCount();
-        const page = 50n; // Traemos hasta 50
-        const start = total > page ? total - page : 0n;
-        // Nota: el ABI de V2 puede no incluir 'deleted'; si falla, quitá el bool del tuple en ABI.
-        const posts = await contract.getPostsRange(Number(start), Number(page));
-
-        // Ordenar descendente (más nuevos arriba)
-        posts.sort((a,b)=> Number(b.id) - Number(a.id));
-
-        listEl.innerHTML = "";
-        for (const p of posts) {
-          // Compatible con V2 (sin 'deleted') y con V3 (con 'deleted')
-          const deleted = (typeof p.deleted === "boolean") ? p.deleted : false;
-          const div = document.createElement('div');
-          div.className = 'card';
-          div.innerHTML = `
-            <div><strong>#${p.id}</strong> – ${new Date(Number(p.timestamp)*1000).toLocaleString()}</div>
-            <div>${deleted ? "<em class='muted'>(eliminado)</em>" : escapeHtml(p.message)}</div>
-            <small class="muted">by ${p.author}</small>
-          `;
-          listEl.appendChild(div);
+        const arr = await contract.getPostsRange(start, page);
+        // Ethers v6 devuelve objetos/arrays; normalizo
+        items = arr.map((p, idx) => {
+          const id = Number((p.id ?? p[0] ?? (start + idx)));
+          const message = String(p.message ?? p[1] ?? "");
+          const author = String(p.author ?? p[2] ?? "0x");
+          const timestamp = Number(p.timestamp ?? p[3] ?? 0);
+          return { id, message, author, timestamp };
+        });
+      } catch (e) {
+        console.warn("getPostsRange falló, usando fallback getPost(i)", e);
+        // Intento 2: leer uno por uno
+        for (let i = start; i < total; i++) {
+          try {
+            const p = await contract.getPost(i);
+            const id = Number(p.id ?? p[0] ?? i);
+            const message = String(p.message ?? p[1] ?? "");
+            const author = String(p.author ?? p[2] ?? "0x");
+            const timestamp = Number(p.timestamp ?? p[3] ?? 0);
+            items.push({ id, message, author, timestamp });
+          } catch {}
         }
-        if (scrollTop) window.scrollTo({top: 0, behavior: "smooth"});
-        uiStatus("");
-      } catch (err) {
-        console.error(err);
-        uiStatus("No se pudieron cargar los posts. Verificá el address del contrato y la red.");
       }
+
+      items.sort((a,b) => b.id - a.id);
+
+      listEl.innerHTML = "";
+      for (const p of items) {
+        const div = document.createElement("div");
+        div.className = "card";
+        const safeMsg = p.message.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+        div.innerHTML = `
+          <div><strong>#${p.id}</strong> – ${new Date(p.timestamp*1000).toLocaleString()}</div>
+          <div>${safeMsg}</div>
+          <small class="muted">by ${p.author}</small>
+        `;
+        listEl.appendChild(div);
+      }
+
+      if (scrollTop) window.scrollTo({ top: 0, behavior: "smooth" });
+      uiStatus("");
+    } catch (err) {
+      console.error(err);
+      uiStatus("No se pudieron cargar los posts. Verificá el address del contrato y la red.");
     }
+  }
+
 
     async function publish() {
       const msg = newPostEl.value.trim();
