@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VisualWall V2 – Demo</title>
+  <style>
+    :root { --gap: 12px; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Helvetica Neue',Arial; margin: 20px auto; max-width: 780px; padding: 0 12px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap: var(--gap); margin-bottom: 16px; }
+    h1 { font-size: 1.4rem; margin: 0; }
+    .row { display:flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fff; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    input[type="text"] { flex: 1; padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; min-width: 220px; }
+    .muted { color: #666; }
+    .card { border: 1px solid #e5e5e5; border-radius: 14px; padding: 12px; margin: 10px 0; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+    .notice { background: #fff9e6; border: 1px solid #ffe08a; padding: 10px 12px; border-radius: 10px; margin: 10px 0; }
+    .ok { background: #eefaf0; border: 1px solid #cdebd1; }
+    footer { margin: 24px 0 40px; font-size: .9rem; color:#666; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>VisualWall V2 – Demo</h1>
+    <div class="row">
+      <button id="connect">Conectar wallet</button>
+      <div id="account" class="muted"></div>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <input id="newPost" type="text" placeholder="Escribí tu post…" />
+      <button id="sendPost" disabled>Publicar</button>
+    </div>
+    <div id="status" class="muted" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="notice">
+    <div>Red objetivo: <strong>Sepolia</strong> (ChainId <span class="mono">11155111</span>)</div>
+    <div>Contrato: <code id="addr" class="mono"></code></div>
+  </div>
+
+  <div id="list"></div>
+
+  <footer>
+    <div class="muted">Consejo: si no ves tus posts, verificá estar en <strong>Sepolia</strong>, que el contrato sea el correcto y que la transacción esté confirmada.</div>
+  </footer>
+
+  <!-- Ethers v6 desde CDN. Necesitás conexión a internet para cargar esta librería. -->
+  <script type="module">
+    import { BrowserProvider, Contract } from "https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.min.js";
+
+    // 🔧 Pegá aquí la dirección de TU contrato VisualWallV2 en Sepolia (reemplazá la constante):
+    const CONTRACT_ADDRESS = "0xA4F64573d3f5b51D65498C3fD4645f35515De4bb";
+    const ABI = [
+      "event PostCreated(uint256 indexed id, address indexed author, uint256 timestamp, string message)",
+      "function createPost(string _message) public",
+      "function getPostsCount() external view returns (uint256)",
+      "function getPostsRange(uint256 start, uint256 limit) external view returns (tuple(uint256 id,string message,address author,uint256 timestamp,bool deleted)[])"
+    ];
+
+    const sepoliaId = 11155111n;
+
+    const addrEl = document.getElementById('addr');
+    const connectBtn = document.getElementById('connect');
+    const sendBtn = document.getElementById('sendPost');
+    const newPostEl = document.getElementById('newPost');
+    const statusEl = document.getElementById('status');
+    const accountEl = document.getElementById('account');
+    const listEl = document.getElementById('list');
+
+    addrEl.textContent = CONTRACT_ADDRESS;
+
+    let provider, signer, contract;
+
+    function uiStatus(msg, ok=false) {
+      statusEl.textContent = msg || "";
+      statusEl.className = ok ? "muted ok" : "muted";
+    }
+
+    function escapeHtml(s) {
+      return s.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+    }
+
+    async function ensureSepolia() {
+      const net = await provider.getNetwork();
+      if (net.chainId !== sepoliaId) {
+        uiStatus("⚠️ Estás en otra red. Cambiando a Sepolia…");
+        try {
+          await window.ethereum.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: "0xaa36a7" }] // 11155111 en hex
+          });
+          uiStatus("✅ Red cambiada a Sepolia", true);
+        } catch (e) {
+          uiStatus("No se pudo cambiar la red automáticamente. Seleccioná Sepolia en MetaMask.");
+          throw e;
+        }
+      }
+    }
+
+    async function connect() {
+      if (!window.ethereum) { alert("Instalá MetaMask para continuar"); return; }
+      provider = new BrowserProvider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      await ensureSepolia();
+      signer = await provider.getSigner();
+      contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
+      accountEl.textContent = await signer.getAddress();
+      sendBtn.disabled = false;
+      await load(true);
+
+      // Refrescar en vivo cuando haya nuevos posts
+      try {
+        contract.on("PostCreated", async () => { await load(true); });
+      } catch {}
+    }
+
+    async function load(scrollTop=false) {
+      listEl.innerHTML = "<div class='muted'>Cargando posts…</div>";
+      try {
+        const total = await contract.getPostsCount();
+        const page = 50n; // Traemos hasta 50
+        const start = total > page ? total - page : 0n;
+        // Nota: el ABI de V2 puede no incluir 'deleted'; si falla, quitá el bool del tuple en ABI.
+        const posts = await contract.getPostsRange(Number(start), Number(page));
+
+        // Ordenar descendente (más nuevos arriba)
+        posts.sort((a,b)=> Number(b.id) - Number(a.id));
+
+        listEl.innerHTML = "";
+        for (const p of posts) {
+          // Compatible con V2 (sin 'deleted') y con V3 (con 'deleted')
+          const deleted = (typeof p.deleted === "boolean") ? p.deleted : false;
+          const div = document.createElement('div');
+          div.className = 'card';
+          div.innerHTML = `
+            <div><strong>#${p.id}</strong> – ${new Date(Number(p.timestamp)*1000).toLocaleString()}</div>
+            <div>${deleted ? "<em class='muted'>(eliminado)</em>" : escapeHtml(p.message)}</div>
+            <small class="muted">by ${p.author}</small>
+          `;
+          listEl.appendChild(div);
+        }
+        if (scrollTop) window.scrollTo({top: 0, behavior: "smooth"});
+        uiStatus("");
+      } catch (err) {
+        console.error(err);
+        uiStatus("No se pudieron cargar los posts. Verificá el address del contrato y la red.");
+      }
+    }
+
+    async function publish() {
+      const msg = newPostEl.value.trim();
+      if (!msg) { uiStatus("Escribí un mensaje antes de publicar"); return; }
+      try {
+        sendBtn.disabled = true;
+        uiStatus("Enviando transacción…");
+        const tx = await contract.createPost(msg);
+        uiStatus("Esperando confirmación…");
+        await tx.wait();
+        newPostEl.value = "";
+        uiStatus("✅ Publicado", true);
+        await load(true);
+      } catch (e) {
+        console.error(e);
+        uiStatus("❌ Transacción rechazada o fallida");
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    connectBtn.addEventListener('click', connect);
+    sendBtn.addEventListener('click', publish);
+  </script>
+</body>
+</html>
